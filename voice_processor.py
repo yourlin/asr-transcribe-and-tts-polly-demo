@@ -10,6 +10,7 @@ from audio_helpers.mic_input import MicrophoneInput
 from audio_helpers.audio_output import AudioOutput
 from aws_services.transcribe_client import TranscribeClient
 from aws_services.polly_client import PollyClient
+from logger_config import logger
 
 
 class VoiceProcessor:
@@ -30,13 +31,13 @@ class VoiceProcessor:
         # 注册信号处理器，以便优雅地退出
         signal.signal(signal.SIGINT, self._signal_handler)
         
-        print("=== AWS语音处理POC ===")
-        print("按Ctrl+C停止程序")
+        logger.info("=== AWS语音处理POC ===")
+        logger.info("按Ctrl+C停止程序")
         
         while self.running:
             try:
                 # 开始录音和转录
-                print("\n准备好了吗？开始说话...")
+                logger.info("\n准备好了吗？开始说话...")
                 self.mic_input.start_recording()
                 self.transcribe_client.start_streaming()
                 
@@ -64,28 +65,34 @@ class VoiceProcessor:
                 
                 # 如果有转录结果，则使用Polly合成语音
                 if transcript and self.running:
-                    print(f"\n转录结果 ({language if language else 'en-US'}): {transcript}")
+                    logger.info(f"\n转录结果 ({language if language else 'en-US'}): {transcript}")
                     
                     # 合成语音
-                    print("正在合成语音...")
+                    logger.info("正在合成语音...")
+                    start_time = time.time()
                     audio_data = self.polly_client.synthesize_speech(transcript, language if language else 'en-US')
                     
                     if audio_data:
                         # 播放合成的语音
-                        print("播放合成的语音...")
+                        logger.info("播放合成的语音...")
                         self.audio_output.play_audio(audio_data)
+                        
+                        # 计算端到端延迟
+                        end_time = time.time()
+                        total_time = end_time - start_time
+                        logger.info(f"端到端处理时间（从转录结束到语音播放）: {total_time:.3f}秒")
                     else:
-                        print("语音合成失败")
+                        logger.error("语音合成失败")
                 else:
-                    print("未检测到语音或转录失败")
+                    logger.warning("未检测到语音或转录失败")
                 
                 if self.running:
                     # 询问是否继续
-                    print("\n按Enter继续，或按Ctrl+C退出")
+                    logger.info("\n按Enter继续，或按Ctrl+C退出")
                     input()
                 
             except Exception as e:
-                print(f"处理过程中出错: {e}")
+                logger.error(f"处理过程中出错: {e}")
                 import traceback
                 traceback.print_exc()
                 self.running = False
@@ -111,7 +118,7 @@ class VoiceProcessor:
     
     def _signal_handler(self, sig, frame):
         """处理Ctrl+C信号"""
-        print("\n正在停止程序...")
+        logger.info("\n正在停止程序...")
         self.running = False
         self.mic_input.stop_recording()
         sys.exit(0)

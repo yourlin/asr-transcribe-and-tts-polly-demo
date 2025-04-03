@@ -7,7 +7,9 @@ import asyncio
 import queue
 import threading
 import traceback
+import time
 from config import TRANSCRIBE_REGION, LANGUAGE_OPTIONS, PREFERRED_LANGUAGE, IDENTIFY_LANGUAGE
+from logger_config import logger
 
 from amazon_transcribe.client import TranscribeStreamingClient
 from amazon_transcribe.handlers import TranscriptResultStreamHandler
@@ -30,9 +32,17 @@ class TranscribeHandler(TranscriptResultStreamHandler):
         self.identified_language = None
         self.is_final = False
         self.callback = callback
+        self.start_time = None
+        self.first_response_time = None
     
     async def handle_transcript_event(self, transcript_event: TranscriptEvent):
         """处理转录事件"""
+        # 记录第一次响应的时间
+        if self.first_response_time is None:
+            self.first_response_time = time.time()
+            response_delay = self.first_response_time - self.start_time
+            logger.info(f"Transcribe首次响应延迟: {response_delay:.3f}秒")
+        
         results = transcript_event.transcript.results
         
         for result in results:
@@ -43,7 +53,7 @@ class TranscribeHandler(TranscriptResultStreamHandler):
                     # 获取置信度最高的语言
                     top_language = max(languages, key=lambda x: x.score)
                     self.identified_language = top_language.language_code
-                    print(f"识别到的语言: {self.identified_language}")
+                    logger.info(f"识别到的语言: {self.identified_language}")
             
             # 获取转录文本
             for alt in result.alternatives:
@@ -53,13 +63,16 @@ class TranscribeHandler(TranscriptResultStreamHandler):
                 if not result.is_partial:
                     self.transcript_result = transcript
                     self.is_final = True
-                    print(f"最终转录结果: {transcript}")
+                    final_time = time.time()
+                    total_time = final_time - self.start_time
+                    logger.info(f"最终转录结果: {transcript}")
+                    logger.info(f"Transcribe总处理时间: {total_time:.3f}秒")
                     
                     # 调用回调函数
                     if self.callback:
                         self.callback(transcript, self.identified_language)
                 else:
-                    print(f"部分转录结果: {transcript}")
+                    logger.debug(f"部分转录结果: {transcript}")
 
 
 class TranscribeClient:
@@ -75,6 +88,7 @@ class TranscribeClient:
         self.stop_thread = False
         self.transcript_result = ""
         self.identified_language = None
+        self.start_time = None
     
     async def _mic_stream(self):
         """
@@ -95,7 +109,7 @@ class TranscribeClient:
                 else:
                     await asyncio.sleep(0.01)
             except Exception as e:
-                print(f"从音频队列获取数据时出错: {e}")
+                logger.error(f"从音频队列获取数据时出错: {e}")
                 break
     
     async def _write_chunks(self):
@@ -107,12 +121,16 @@ class TranscribeClient:
             # 结束流
             await self.stream.input_stream.end_stream()
         except Exception as e:
-            print(f"发送音频数据时出错: {e}")
+            logger.error(f"发送音频数据时出错: {e}")
             traceback.print_exc()
     
     async def _run_transcription(self):
         """运行转录流程"""
         try:
+            # 记录开始时间
+            self.start_time = time.time()
+            logger.info("开始Transcribe转录流程")
+            
             # 创建客户端
             self.client = TranscribeStreamingClient(region=TRANSCRIBE_REGION)
             
@@ -150,19 +168,28 @@ class TranscribeClient:
                         if 'show_language_identification' in param_names:
                             params["show_language_identification"] = True
             
-            print(f"使用以下参数启动转录: {params}")
+            logger.debug(f"使用以下参数启动转录: {params}")
+            
+            # 记录API调用开始时间
+            api_start_time = time.time()
             self.stream = await self.client.start_stream_transcription(**params)
+            api_end_time = time.time()
+            
+            # 记录API调用延迟
+            api_delay = api_end_time - api_start_time
+            logger.info(f"Transcribe API调用延迟: {api_delay:.3f}秒")
             
             # 创建处理器
             self.handler = TranscribeHandler(
                 self.stream.output_stream,
                 callback=self._on_transcription_result
             )
+            self.handler.start_time = self.start_time
             
             # 运行转录和处理
             await asyncio.gather(self._write_chunks(), self.handler.handle_events())
         except Exception as e:
-            print(f"运行转录时出错: {e}")
+            logger.error(f"运行转录时出错: {e}")
             traceback.print_exc()
     
     def _on_transcription_result(self, transcript, language):
@@ -178,7 +205,7 @@ class TranscribeClient:
         try:
             loop.run_until_complete(self._run_transcription())
         except Exception as e:
-            print(f"转录线程出错: {e}")
+            logger.error(f"转录线程出错: {e}")
             traceback.print_exc()
         finally:
             loop.close()
@@ -195,6 +222,8 @@ class TranscribeClient:
         self.stream_thread = threading.Thread(target=self._transcription_thread)
         self.stream_thread.daemon = True
         self.stream_thread.start()
+        
+        logger.info("开始录音和转录")
     
     def send_audio_chunk(self, audio_chunk):
         """发送音频块到Transcribe服务"""
@@ -207,6 +236,7 @@ class TranscribeClient:
     
     def stop_streaming(self):
         """停止流式转录"""
+        logger.info("停止转录")
         self.stop_thread = True
         
         # 等待转录线程结束
